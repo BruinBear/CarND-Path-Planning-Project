@@ -26,10 +26,11 @@ double rad2deg(double x) {
 
 double MS_TO_MPH = 2.23694;
 
-double MAX_SPEED = 49.5; //mph
-double MINIMAL_DISTANCE_TO_CAR_AHEAD_M = 40; //m
+double MAX_SPEED = 49; //mph
+double MINIMAL_DISTANCE_TO_CAR_AHEAD_M = 50; //m
 double LANE_CHANGE_MINIMAL_GAP = 10; //m
-double LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS = 4; //mph
+double LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS = 2; //mph
+double GAP_SPEED_DIFFERENCE = 2;
 
 enum BehaviorState {
   KL,
@@ -269,9 +270,6 @@ int main() {
               double car_speed = j[1]["speed"];
               double car_speed_ms = (double) car_speed / MS_TO_MPH;
 
-              // DEBUG
-//              printf("Car status {lane %d} \n", lane);
-
               // Previous path data given to the Planner
               auto previous_path_x = j[1]["previous_path_x"];
               auto previous_path_y = j[1]["previous_path_y"];
@@ -338,143 +336,143 @@ int main() {
               }
 
               BehaviorState next_state;
-              double match_speed;
+              double target_speed = car_speed;
               int offset = 0;
               // Determine which state to transition to
               switch (state) {
                 case KL:
                   if (leading_vehicle_distance_m[lane] > MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
-                    if (ref_vel < MAX_SPEED) {
-                      ref_vel += .224;
-                      printf("{Lane: %d, Speed %.2f} KL -> KL, SPEED UP TO %.2f\n", lane, car_speed,
-                             MAX_SPEED);
-                    } else {
-                      printf("{Lane: %d, Speed %.2f} KL -> KL, KEEP SPEED\n", lane, car_speed);
-                    }
+                    target_speed = MAX_SPEED;
                     next_state = KL;
                   } else {
                     // if lane is all packed, let's not switch
                     if (leading_vehicle_distance_m[0] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M &&
                         leading_vehicle_distance_m[1] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M &&
                         leading_vehicle_distance_m[2] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
-                      printf("{Lane: %d, Speed %.2f} KL -> KL, SLOW DOWN, Lane Packed\n", lane, car_speed);
                       next_state = KL;
                     } else if (lane == 1) {
                       if (vehicle_count_in_lane[0] <= vehicle_count_in_lane[2]) {
                         next_state = PLCL;
-                        printf("{Lane: %d, Speed %.2f} KL -> PLCL, Left lane less car\n", lane,
-                               car_speed);
                       } else {
                         next_state = PLCR;
-                        printf("{Lane: %d, Speed %.2f} KL -> PLCR, Right lane less car \n", lane,
-                               car_speed);
                       }
                     } else if (lane == 0) {
                       next_state = PLCR;
-                      printf("{Lane: %d, Speed %.2f} KL -> PLCR\n", lane,
-                             car_speed);
                     } else {
                       next_state = PLCL;
-                      printf("{Lane: %d, Speed %.2f} KL -> PLCL\n", lane,
-                             car_speed);
                     }
-                    ref_vel -= .224;
+                    if (abs(ref_vel - leading_vehicle_velocity_ms[lane]) > 2) {
+                      target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH;
+                    }
                   }
                   break;
                 case PLCL:
-                  printf("left lane speed 1 %.2f, left lane speed 2 %.2f, car speed %.2f",
-                         leading_vehicle_velocity_ms[lane - 1], trailing_vehicle_velocity_ms[lane - 1], car_speed);
-
-                  if (abs(leading_vehicle_distance_m[lane - 1]) > LANE_CHANGE_MINIMAL_GAP &&
-                      abs(trailing_vehicle_distance_m[lane - 1]) > LANE_CHANGE_MINIMAL_GAP &&
-                      abs(leading_vehicle_velocity_ms[lane - 1] - car_speed_ms) <
-                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS &&
-                      abs(trailing_vehicle_velocity_ms[lane - 1] - car_speed_ms) <
-                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS) {
+                  if (abs(leading_vehicle_distance_m[lane]) > 1.5 * MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                    next_state = KL;
+                  } else if (abs(leading_vehicle_distance_m[lane - 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                             abs(trailing_vehicle_distance_m[lane - 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                             (leading_vehicle_velocity_ms[lane - 1] > car_speed_ms ||
+                              abs(leading_vehicle_velocity_ms[lane - 1] - car_speed_ms) <
+                              LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS) &&
+                             (car_speed_ms > trailing_vehicle_velocity_ms[lane - 1] ||
+                              abs(trailing_vehicle_velocity_ms[lane - 1] - car_speed_ms) <
+                              LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS)) {
                     // ready for lane switch
-                    printf("{Lane: %d, Speed %.2f} PLCL -> LCL\n", lane, car_speed);
                     lane--;
                     next_state = LCL;
+                    target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH;
                   } else if (leading_vehicle_distance_m[lane] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
-                    printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Slow Down\n",
-                           lane,
-                           car_speed);
-                    ref_vel -= .224;
                     next_state = PLCL;
+                    target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH - 5;
                   } else {
                     if (leading_vehicle_velocity_ms[lane - 1] > car_speed_ms && ref_vel < MAX_SPEED) {
-                      printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Speed up\n", lane, car_speed);
-                      ref_vel += .224;
+                      target_speed = MAX_SPEED;
+                    } else if (leading_vehicle_distance_m[lane - 1] > 2 * MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                      target_speed = MAX_SPEED;
                     } else if (leading_vehicle_velocity_ms[lane - 1] < car_speed_ms) {
-                      printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Slow down\n", lane, car_speed);
-                      ref_vel -= .224;
+                      target_speed = leading_vehicle_velocity_ms[lane - 1] * MS_TO_MPH;
+                    } else {
+                      target_speed = car_speed;
                     }
-                    printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Keep Speed\n", lane, car_speed);
                     next_state = PLCL;
                   }
                   break;
                 case PLCR:
-                  if (abs(leading_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP &&
-                      abs(trailing_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP &&
-                      abs(leading_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
-                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS &&
-                      abs(trailing_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
-                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS) {
+//                  if (!(abs(leading_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP)) {
+//                    printf("![Target Leading Car Far Enough]");
+//                  }
+//                  if (!(abs(trailing_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP)) {
+//                    printf("![Target Trailing Car Far Enough]");
+//                  }
+//                  if (!(leading_vehicle_velocity_ms[lane + 1] > car_speed_ms ||
+//                        abs(leading_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
+//                        LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS)) {
+//                    printf("![Target Leading Car Velocity fast enough or same fast]");
+//                  }
+//                  if (!(car_speed_ms > trailing_vehicle_velocity_ms[lane + 1] ||
+//                        abs(trailing_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
+//                        LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS)) {
+//                    printf("![Target trailing Car Velocity slow enough or same fast]");
+//                  }
+                  if (abs(leading_vehicle_distance_m[lane]) > 1.5 * MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                    next_state = KL;
+                  } else if (abs(leading_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                             abs(trailing_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                             (leading_vehicle_velocity_ms[lane + 1] > car_speed_ms ||
+                              abs(leading_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
+                              LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS) &&
+                             (car_speed_ms > trailing_vehicle_velocity_ms[lane + 1] ||
+                              abs(trailing_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
+                              LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS)
+                      ) {
                     // ready for lane switch
-                    printf("{Lane: %d, Speed %.2f} PLCR -> LCR\n", lane, car_speed);
                     lane++;
                     next_state = LCR;
+                    target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH;
                   } else if (leading_vehicle_distance_m[lane] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
-                    printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Slow Down\n",
-                           lane,
-                           car_speed);
-                    ref_vel -= .224;
                     next_state = PLCR;
+                    target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH - 5;
                   } else {
                     if (leading_vehicle_velocity_ms[lane + 1] > car_speed_ms && ref_vel < MAX_SPEED) {
-                      printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Speed up\n", lane, car_speed);
-                      ref_vel += .224;
+                      target_speed = MAX_SPEED;
+                    } else if (leading_vehicle_distance_m[lane + 1] > 2 * MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                      target_speed = MAX_SPEED;
                     } else if (leading_vehicle_velocity_ms[lane + 1] < car_speed_ms) {
-                      printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Slow down\n", lane, car_speed);
-                      ref_vel -= .224;
+                      target_speed = leading_vehicle_velocity_ms[lane + 1] * MS_TO_MPH;
+                    } else {
+                      target_speed = car_speed;
                     }
-                    printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Keep Speed\n", lane, car_speed);
                     next_state = PLCR;
                   }
                   break;
                 case LCL:
                   // if current d is not yet in target lane, keep state
                   if (abs(car_d - (lane * 4 + 2)) < 0.3) {
-                    printf("{Lane: %d, Speed %.2f} LCL -> KL, Keep Speed\n", lane, car_speed);
                     next_state = KL;
+                    target_speed = car_speed;
                   } else {
                     // during lane transition, need to match new lane speed
-                    if (trailing_vehicle_velocity_ms[lane] > car_speed_ms && ref_vel < MAX_SPEED) {
-                      printf("{Lane: %d, Speed %.2f} LCL -> LCL, Speed up\n", lane, car_speed);
-                      ref_vel += .224;
-                    } else if (trailing_vehicle_velocity_ms[lane] < car_speed_ms) {
-                      printf("{Lane: %d, Speed %.2f} LCL -> LCL, Slow down\n", lane, car_speed);
-                      ref_vel -= .224;
-                    }
+                    target_speed =
+                        0.5 * (leading_vehicle_velocity_ms[lane] + trailing_vehicle_velocity_ms[lane]) * MS_TO_MPH;
                     next_state = LCL;
                   }
                   break;
                 case LCR:
                   if (abs(car_d - (lane * 4 + 2)) < 0.3) {
                     next_state = KL;
-                    printf("{Lane: %d, Speed %.2f} LCR -> KL, Keep Speed\n", lane, car_speed);
                   } else {
-                    // during lane transition, need to match new lane speed
-                    if (trailing_vehicle_velocity_ms[lane] > car_speed_ms && ref_vel < MAX_SPEED) {
-                      printf("{Lane: %d, Speed %.2f} LCR -> LCR, Speed up\n", lane, car_speed);
-                      ref_vel += .224;
-                    } else if (trailing_vehicle_velocity_ms[lane] < car_speed_ms) {
-                      printf("{Lane: %d, Speed %.2f} LCR -> LCR, Slow down\n", lane, car_speed);
-                      ref_vel -= .224;
-                    }
+                    target_speed =
+                        0.5 * (leading_vehicle_velocity_ms[lane] + trailing_vehicle_velocity_ms[lane]) * MS_TO_MPH;
                     next_state = LCR;
                   }
                   break;
+              }
+
+              printf("{Car state %u, speed %.2f, Lane %d, Target speed %.2f}\n", state, car_speed, lane, target_speed);
+              if (ref_vel < MAX_SPEED && ref_vel < target_speed)
+                ref_vel += 0.2;
+              else if (ref_vel > target_speed) {
+                ref_vel -= .224;
               }
               state = next_state;
 
@@ -571,16 +569,6 @@ int main() {
                 next_x_vals.push_back(x_point);
                 next_y_vals.push_back(y_point);
               }
-
-              //            double dist_inc = 0.5;
-              //            for(int i = 0; i < 50; i++)
-              //            {
-              //              double next_s = car_s+(i+1) * dist_inc;
-              //              double next_d = 6;
-              //              vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-              //              next_x_vals.push_back(xy[0]);
-              //              next_y_vals.push_back(xy[1]);
-              //            }
 
               json msgJson;
 
