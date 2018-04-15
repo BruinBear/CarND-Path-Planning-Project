@@ -1,13 +1,8 @@
 #include <fstream>
 #include <math.h>
 #include <uWS/uWS.h>
-#include <chrono>
-#include <iostream>
 #include <thread>
-#include <vector>
-#include <float.h>
 #include "Eigen-3.3/Eigen/Core"
-#include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
 #include "spline.h"
 
@@ -17,22 +12,31 @@ using namespace std;
 using json = nlohmann::json;
 
 // For converting back and forth between radians and degrees.
-constexpr double pi() { return M_PI; }
+constexpr double pi() {
+  return M_PI;
+}
 
-double deg2rad(double x) { return x * pi() / 180; }
+double deg2rad(double x) {
+  return x * pi() / 180;
+}
 
-double rad2deg(double x) { return x * 180 / pi(); }
+double rad2deg(double x) {
+  return x * 180 / pi();
+}
+
+double MS_TO_MPH = 2.23694;
 
 double MAX_SPEED = 49.5; //mph
-double MINIMAL_DISTANCE_TO_CAR_AHEAD = 30; //m
-double MINIMAL_GAP_TO_CHANGE_LANE = 10; //m
+double MINIMAL_DISTANCE_TO_CAR_AHEAD_M = 40; //m
+double LANE_CHANGE_MINIMAL_GAP = 10; //m
+double LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS = 4; //mph
 
 enum BehaviorState {
-  KEEP_LANE,
-  PREPARE_LANE_CHANGE_LEFT,
-  PREPARE_LANE_CHANGE_RIGHT,
-  LANE_CHANGE_LEFT,
-  LANE_CHANGE_RIGHT
+  KL,
+  PLCL,
+  PLCR,
+  LCL,
+  LCR
 };
 
 // Checks if the SocketIO event has JSON data.
@@ -54,7 +58,9 @@ double distance(double x1, double y1, double x2, double y2) {
   return sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
 }
 
-int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y) {
+int ClosestWaypoint(double x, double y,
+                    const vector<double> &maps_x,
+                    const vector<double> &maps_y) {
 
   double closestLen = 100000; //large number
   int closestWaypoint = 0;
@@ -74,7 +80,9 @@ int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vect
 
 }
 
-int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y) {
+int NextWaypoint(double x, double y, double theta,
+                 const vector<double> &maps_x,
+                 const vector<double> &maps_y) {
 
   int closestWaypoint = ClosestWaypoint(x, y, maps_x, maps_y);
 
@@ -97,7 +105,9 @@ int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x,
 }
 
 // Transform from Cartesian x,y coordinates to Frenet s,d coordinates
-vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y) {
+vector<double> getFrenet(double x, double y, double theta,
+                         const vector<double> &maps_x,
+                         const vector<double> &maps_y) {
   int next_wp = NextWaypoint(x, y, theta, maps_x, maps_y);
 
   int prev_wp;
@@ -137,13 +147,19 @@ vector<double> getFrenet(double x, double y, double theta, const vector<double> 
 
   frenet_s += distance(0, 0, proj_x, proj_y);
 
-  return {frenet_s, frenet_d};
+  return {
+      frenet_s,
+      frenet_d
+  };
 
 }
 
 // Transform from Frenet s,d coordinates to Cartesian x,y
 vector<double>
-getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y) {
+getXY(double s, double d,
+      const vector<double> &maps_s,
+      const vector<double> &maps_x,
+      const vector<double> &maps_y) {
   int prev_wp = -1;
 
   while (s > maps_s[prev_wp + 1] && (prev_wp < (int) (maps_s.size() - 1))) {
@@ -164,7 +180,10 @@ getXY(double s, double d, const vector<double> &maps_s, const vector<double> &ma
   double x = seg_x + d * cos(perp_heading);
   double y = seg_y + d * sin(perp_heading);
 
-  return {x, y};
+  return {
+      x,
+      y
+  };
 
 }
 
@@ -207,18 +226,27 @@ int main() {
 
   int lane = 1;
   double ref_vel = 0;
-  BehaviorState state = KEEP_LANE;
+  BehaviorState state = KL;
+  vector<int> vehicle_count_in_lane(3);
+  vector<double> leading_vehicle_distance_m(3);
+  vector<double> leading_vehicle_velocity_ms(3);
+  vector<double> trailing_vehicle_distance_m(3);
+  vector<double> trailing_vehicle_velocity_ms(3);
 
   h.onMessage(
-      [&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy, &lane, &ref_vel](
+      [& map_waypoints_x, & map_waypoints_y, & map_waypoints_s, & map_waypoints_dx, & map_waypoints_dy, & lane, & ref_vel, & state, &vehicle_count_in_lane,
+          & leading_vehicle_distance_m,
+          &leading_vehicle_velocity_ms,
+          &trailing_vehicle_distance_m,
+          &trailing_vehicle_velocity_ms
+      ](
           uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
           uWS::OpCode opCode) {
         // "42" at the start of the message means there's a websocket message event.
         // The 4 signifies a websocket message
         // The 2 signifies a websocket event
         //auto sdata = string(data).substr(0, length);
-        //cout << sdata << endl;
-
+        //// cout << sdata << endl;
 
         if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
@@ -239,9 +267,10 @@ int main() {
               double car_d = j[1]["d"];
               double car_yaw = j[1]["yaw"];
               double car_speed = j[1]["speed"];
+              double car_speed_ms = (double) car_speed / MS_TO_MPH;
 
               // DEBUG
-              printf("Car status {lane %d} \n", lane);
+//              printf("Car status {lane %d} \n", lane);
 
               // Previous path data given to the Planner
               auto previous_path_x = j[1]["previous_path_x"];
@@ -260,24 +289,28 @@ int main() {
               }
 
               bool is_there_a_slow_car_ahead = false;
-              bool is_lane_change_left_safe = lane > 0;
-              bool is_lane_change_right_safe = lane < 2;
+              bool is_LCL_safe = lane > 0;
+              bool is_LCR_safe = lane < 2;
 
-              int lane_0_has_vehicle = 0;
-              int lane_1_has_vehicle = 0;
-              int lane_2_has_vehicle = 0;
+              vehicle_count_in_lane[0] = 0;
+              vehicle_count_in_lane[1] = 0;
+              vehicle_count_in_lane[2] = 0;
 
-              double lane_0_leading_vehicle_distance = 10000;
-              double lane_1_leading_vehicle_distance = 10000;
-              double lane_2_leading_vehicle_distance = 10000;
+              leading_vehicle_distance_m[0] = 10000;
+              leading_vehicle_distance_m[1] = 10000;
+              leading_vehicle_distance_m[2] = 10000;
 
-              double lane_0_trailing_vehicle_distance = -10000;
-              double lane_1_trailing_vehicle_distance = -10000;
-              double lane_2_trailing_vehicle_distance = -10000;
+              leading_vehicle_velocity_ms[0] = car_speed_ms;
+              leading_vehicle_velocity_ms[1] = car_speed_ms;
+              leading_vehicle_velocity_ms[2] = car_speed_ms;
 
-              double lane_0_leading_vehicle_velocity = 10000;
-              double lane_1_leading_vehicle_velocity = 10000;
-              double lane_2_leading_vehicle_velocity = 10000;
+              trailing_vehicle_distance_m[0] = -10000;
+              trailing_vehicle_distance_m[1] = -10000;
+              trailing_vehicle_distance_m[2] = -10000;
+
+              trailing_vehicle_velocity_ms[0] = car_speed_ms;
+              trailing_vehicle_velocity_ms[1] = car_speed_ms;
+              trailing_vehicle_velocity_ms[2] = car_speed_ms;
 
               for (int i = 0; i < sensor_fusion.size(); i++) {
                 float d = sensor_fusion[i][6];
@@ -286,146 +319,164 @@ int main() {
                 double detected_car_velocity = sqrt(pow(vx, 2) + pow(vy, 2));
                 double detected_car_s = sensor_fusion[i][5];
                 detected_car_s += ((double) prev_size * 0.02 * detected_car_velocity);
-                auto relative_distance_to_my_car = detected_car_s - car_s;
-                if (d >= 0 && d < 4) {
-                  lane_0_has_vehicle++;
-                  if (relative_distance_to_my_car > 0) {
-                    // update leading vehicle
-                    if (relative_distance_to_my_car < lane_0_leading_vehicle_distance) {
-                      lane_0_leading_vehicle_distance = relative_distance_to_my_car;
-                      lane_0_leading_vehicle_velocity = detected_car_velocity;
-                    }
-
-                    if (lane == 0 && relative_distance_to_my_car < MINIMAL_DISTANCE_TO_CAR_AHEAD) {
-                      is_there_a_slow_car_ahead = true;
-                    }
-                  } else {
-                    // update trailing vehicle
-                    lane_0_trailing_vehicle_distance = max(lane_0_trailing_vehicle_distance,
-                                                           relative_distance_to_my_car);
+                auto relative_distance = detected_car_s - car_s;
+                int lane_index = int(d / 4);
+                vehicle_count_in_lane[lane_index]++;
+                if (relative_distance > 0) {
+                  // update leading vehicle
+                  if (abs(relative_distance) < abs(leading_vehicle_distance_m[lane_index])) {
+                    leading_vehicle_distance_m[lane_index] = relative_distance;
+                    leading_vehicle_velocity_ms[lane_index] = detected_car_velocity;
                   }
-                  // determine if it is safe to change into lane 2
-                  if (lane == 1 && abs(relative_distance_to_my_car) < MINIMAL_GAP_TO_CHANGE_LANE) {
-                    is_lane_change_left_safe = false;
-                  }
-                } else if (d >= 4 && d < 8) {
-                  lane_1_has_vehicle++;
-                  if (relative_distance_to_my_car > 0) {
-                    // update leading vehicle
-                    if (relative_distance_to_my_car < lane_1_leading_vehicle_distance) {
-                      lane_1_leading_vehicle_distance = relative_distance_to_my_car;
-                      lane_1_leading_vehicle_velocity = detected_car_velocity;
-                    }
-                    if (lane == 1 && relative_distance_to_my_car < MINIMAL_DISTANCE_TO_CAR_AHEAD) {
-                      is_there_a_slow_car_ahead = true;
-                    }
-                  } else {
-                    // update trailing vehicle
-                    lane_1_trailing_vehicle_distance = max(lane_1_trailing_vehicle_distance,
-                                                           relative_distance_to_my_car);
-                  }
-                  // determine if it is safe to change into lane 1
-                  if (abs(relative_distance_to_my_car) < MINIMAL_GAP_TO_CHANGE_LANE) {
-                    if (lane == 0) {
-                      is_lane_change_right_safe = false;
-                    }
-                    if (lane == 2) {
-                      is_lane_change_left_safe = false;
-                    }
-                  }
-                } else if (d >= 8 && d <= 12) {
-                  lane_2_has_vehicle++;
-                  if (relative_distance_to_my_car > 0) {
-                    // update trailing vehicle
-                    if (relative_distance_to_my_car < lane_2_leading_vehicle_distance) {
-                      lane_2_leading_vehicle_distance = relative_distance_to_my_car;
-                      lane_2_leading_vehicle_velocity = detected_car_velocity;
-                    }
-                    if (lane == 2 && relative_distance_to_my_car < MINIMAL_DISTANCE_TO_CAR_AHEAD) {
-                      is_there_a_slow_car_ahead = true;
-                    }
-                  } else {
-                    // update trailing vehicle
-                    lane_2_trailing_vehicle_distance = max(lane_2_trailing_vehicle_distance,
-                                                           relative_distance_to_my_car);
-                  }
-
-                  // determine if it is safe to change into lane 2
-                  if (lane == 1 && abs(relative_distance_to_my_car) < MINIMAL_GAP_TO_CHANGE_LANE) {
-                    is_lane_change_right_safe = false;
-                  }
-                }
-              }
-//
-//              BehaviorState next_state;
-//              // Determine which state to transition to
-//              switch (state) {
-//                case KEEP_LANE:
-//                  // keep in the lane if
-//                  // 1. there is no car in current lane
-//                  // 2. there is no viable to prepare for lane change (nearest gap is too far)
-//                  if (!is_there_a_slow_car_ahead) {
-//                    next_state = KEEP_LANE;
-//                  } else if (is_there_a_slow_car_ahead && impossible_to_prepare_change_lane) {
-//                    next_state = KEEP_LANE;
-//                  }
-//                  break;
-//                case PREPARE_LANE_CHANGE_LEFT:
-//                  break;
-//                case
-//                  PREPARE_LANE_CHANGE_RIGHT:
-//                  break;
-//                case LANE_CHANGE_LEFT:
-//                  break;
-//                case LANE_CHANGE_RIGHT:
-//                  break;
-//              }
-//
-//              printf("lane 0 %d lane 1 %d, lane 2 %d\n", lane_0_has_vehicle, lane_1_has_vehicle, lane_2_has_vehicle);
-//              printf("lane 0 closest %f lane 1 closest %f, lane 2 closest %f\n", lane_0_leading_vehicle_distance,
-//                     lane_1_leading_vehicle_distance, lane_2_leading_vehicle_distance);
-
-
-              if (is_there_a_slow_car_ahead) {
-                // shift to a lane to pass slow car
-                if (is_lane_change_left_safe) {
-                  lane--;
-                  cout << " Change Lane Left, new lane " << lane << endl;
-                } else if (is_lane_change_right_safe) {
-                  lane++;
-                  cout << " Change Lane Right, new lane " << lane << endl;
                 } else {
-                  ref_vel -= .224;
-                  cout << " Keep lane, slow down." << endl;
+                  // update trailing vehicle
+                  if (abs(relative_distance) < abs(trailing_vehicle_distance_m[lane_index])) {
+                    trailing_vehicle_distance_m[lane_index] = relative_distance;
+                    trailing_vehicle_velocity_ms[lane_index] = detected_car_velocity;
+                  }
                 }
-              } else if (ref_vel < MAX_SPEED) {
-                ref_vel += .224;
-                cout << " Keep lane, speed up." << endl;
-              } else {
-                cout << " Keep Lane, keep speed" << endl;
               }
 
+              BehaviorState next_state;
+              double match_speed;
+              int offset = 0;
+              // Determine which state to transition to
+              switch (state) {
+                case KL:
+                  if (leading_vehicle_distance_m[lane] > MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                    if (ref_vel < MAX_SPEED) {
+                      ref_vel += .224;
+                      printf("{Lane: %d, Speed %.2f} KL -> KL, SPEED UP TO %.2f\n", lane, car_speed,
+                             MAX_SPEED);
+                    } else {
+                      printf("{Lane: %d, Speed %.2f} KL -> KL, KEEP SPEED\n", lane, car_speed);
+                    }
+                    next_state = KL;
+                  } else {
+                    // if lane is all packed, let's not switch
+                    if (leading_vehicle_distance_m[0] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M &&
+                        leading_vehicle_distance_m[1] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M &&
+                        leading_vehicle_distance_m[2] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                      printf("{Lane: %d, Speed %.2f} KL -> KL, SLOW DOWN, Lane Packed\n", lane, car_speed);
+                      next_state = KL;
+                    } else if (lane == 1) {
+                      if (vehicle_count_in_lane[0] <= vehicle_count_in_lane[2]) {
+                        next_state = PLCL;
+                        printf("{Lane: %d, Speed %.2f} KL -> PLCL, Left lane less car\n", lane,
+                               car_speed);
+                      } else {
+                        next_state = PLCR;
+                        printf("{Lane: %d, Speed %.2f} KL -> PLCR, Right lane less car \n", lane,
+                               car_speed);
+                      }
+                    } else if (lane == 0) {
+                      next_state = PLCR;
+                      printf("{Lane: %d, Speed %.2f} KL -> PLCR\n", lane,
+                             car_speed);
+                    } else {
+                      next_state = PLCL;
+                      printf("{Lane: %d, Speed %.2f} KL -> PLCL\n", lane,
+                             car_speed);
+                    }
+                    ref_vel -= .224;
+                  }
+                  break;
+                case PLCL:
+                  printf("left lane speed 1 %.2f, left lane speed 2 %.2f, car speed %.2f",
+                         leading_vehicle_velocity_ms[lane - 1], trailing_vehicle_velocity_ms[lane - 1], car_speed);
 
-//              for (int i = 0; i < sensor_fusion.size(); i++) {
-//                float d = sensor_fusion[i][6];
-//                if (d < (2 + 4 * lane + 2) && d > (2 * 4 * lane - 2)) {
-//                  double vx = sensor_fusion[i][3];
-//                  double vy = sensor_fusion[i][4];
-//                  double check_speed = sqrt(pow(vx, 2) + pow(vy, 2));
-//                  double check_car_s = sensor_fusion[i][5];
-//                  check_car_s += ((double) prev_size * 0.02 * check_speed);
-//                  if ((check_car_s > car_s) && (check_car_s - car_s) < 30) {
-//                    too_close = true;
-//                    if (lane == 1) {
-//                      lane += ((double) rand() / (RAND_MAX)) > 0.5 ? 1 : -1;
-//                    } else if (lane > 0) {
-//                      lane--;
-//                    } else if (lane < 2) {
-//                      lane++;
-//                    }
-//                  }
-//                }
-//              }
+                  if (abs(leading_vehicle_distance_m[lane - 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                      abs(trailing_vehicle_distance_m[lane - 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                      abs(leading_vehicle_velocity_ms[lane - 1] - car_speed_ms) <
+                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS &&
+                      abs(trailing_vehicle_velocity_ms[lane - 1] - car_speed_ms) <
+                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS) {
+                    // ready for lane switch
+                    printf("{Lane: %d, Speed %.2f} PLCL -> LCL\n", lane, car_speed);
+                    lane--;
+                    next_state = LCL;
+                  } else if (leading_vehicle_distance_m[lane] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                    printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Slow Down\n",
+                           lane,
+                           car_speed);
+                    ref_vel -= .224;
+                    next_state = PLCL;
+                  } else {
+                    if (leading_vehicle_velocity_ms[lane - 1] > car_speed_ms && ref_vel < MAX_SPEED) {
+                      printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Speed up\n", lane, car_speed);
+                      ref_vel += .224;
+                    } else if (leading_vehicle_velocity_ms[lane - 1] < car_speed_ms) {
+                      printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Slow down\n", lane, car_speed);
+                      ref_vel -= .224;
+                    }
+                    printf("{Lane: %d, Speed %.2f} PLCL -> PLCL, Keep Speed\n", lane, car_speed);
+                    next_state = PLCL;
+                  }
+                  break;
+                case PLCR:
+                  if (abs(leading_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                      abs(trailing_vehicle_distance_m[lane + 1]) > LANE_CHANGE_MINIMAL_GAP &&
+                      abs(leading_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
+                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS &&
+                      abs(trailing_vehicle_velocity_ms[lane + 1] - car_speed_ms) <
+                      LANE_CHANGE_MAXIMUM_SPEED_DIFFERENCE_MS) {
+                    // ready for lane switch
+                    printf("{Lane: %d, Speed %.2f} PLCR -> LCR\n", lane, car_speed);
+                    lane++;
+                    next_state = LCR;
+                  } else if (leading_vehicle_distance_m[lane] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
+                    printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Slow Down\n",
+                           lane,
+                           car_speed);
+                    ref_vel -= .224;
+                    next_state = PLCR;
+                  } else {
+                    if (leading_vehicle_velocity_ms[lane + 1] > car_speed_ms && ref_vel < MAX_SPEED) {
+                      printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Speed up\n", lane, car_speed);
+                      ref_vel += .224;
+                    } else if (leading_vehicle_velocity_ms[lane + 1] < car_speed_ms) {
+                      printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Slow down\n", lane, car_speed);
+                      ref_vel -= .224;
+                    }
+                    printf("{Lane: %d, Speed %.2f} PLCR -> PLCR, Keep Speed\n", lane, car_speed);
+                    next_state = PLCR;
+                  }
+                  break;
+                case LCL:
+                  // if current d is not yet in target lane, keep state
+                  if (abs(car_d - (lane * 4 + 2)) < 0.3) {
+                    printf("{Lane: %d, Speed %.2f} LCL -> KL, Keep Speed\n", lane, car_speed);
+                    next_state = KL;
+                  } else {
+                    // during lane transition, need to match new lane speed
+                    if (trailing_vehicle_velocity_ms[lane] > car_speed_ms && ref_vel < MAX_SPEED) {
+                      printf("{Lane: %d, Speed %.2f} LCL -> LCL, Speed up\n", lane, car_speed);
+                      ref_vel += .224;
+                    } else if (trailing_vehicle_velocity_ms[lane] < car_speed_ms) {
+                      printf("{Lane: %d, Speed %.2f} LCL -> LCL, Slow down\n", lane, car_speed);
+                      ref_vel -= .224;
+                    }
+                    next_state = LCL;
+                  }
+                  break;
+                case LCR:
+                  if (abs(car_d - (lane * 4 + 2)) < 0.3) {
+                    next_state = KL;
+                    printf("{Lane: %d, Speed %.2f} LCR -> KL, Keep Speed\n", lane, car_speed);
+                  } else {
+                    // during lane transition, need to match new lane speed
+                    if (trailing_vehicle_velocity_ms[lane] > car_speed_ms && ref_vel < MAX_SPEED) {
+                      printf("{Lane: %d, Speed %.2f} LCR -> LCR, Speed up\n", lane, car_speed);
+                      ref_vel += .224;
+                    } else if (trailing_vehicle_velocity_ms[lane] < car_speed_ms) {
+                      printf("{Lane: %d, Speed %.2f} LCR -> LCR, Slow down\n", lane, car_speed);
+                      ref_vel -= .224;
+                    }
+                    next_state = LCR;
+                  }
+                  break;
+              }
+              state = next_state;
 
               vector<double> ptsx;
               vector<double> ptsy;
@@ -465,7 +516,6 @@ int main() {
               vector<double> next_wp2 = getXY(car_s + 90, (2 + 4 * lane), map_waypoints_s, map_waypoints_x,
                                               map_waypoints_y);
 
-
               ptsx.push_back(next_wp0[0]);
               ptsx.push_back(next_wp1[0]);
               ptsx.push_back(next_wp2[0]);
@@ -473,7 +523,6 @@ int main() {
               ptsy.push_back(next_wp0[1]);
               ptsy.push_back(next_wp1[1]);
               ptsy.push_back(next_wp2[1]);
-
 
               // transform into the car's reference frame
               for (int i = 0; i < ptsx.size(); i++) {
@@ -490,7 +539,6 @@ int main() {
 
               vector<double> next_x_vals;
               vector<double> next_y_vals;
-
 
               // start with all of the previous path points from last time
               for (int i = 0; i < previous_path_x.size(); i++) {
@@ -524,15 +572,15 @@ int main() {
                 next_y_vals.push_back(y_point);
               }
 
-//            double dist_inc = 0.5;
-//            for(int i = 0; i < 50; i++)
-//            {
-//              double next_s = car_s+(i+1) * dist_inc;
-//              double next_d = 6;
-//              vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-//              next_x_vals.push_back(xy[0]);
-//              next_y_vals.push_back(xy[1]);
-//            }
+              //            double dist_inc = 0.5;
+              //            for(int i = 0; i < 50; i++)
+              //            {
+              //              double next_s = car_s+(i+1) * dist_inc;
+              //              double next_d = 6;
+              //              vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              //              next_x_vals.push_back(xy[0]);
+              //              next_y_vals.push_back(xy[1]);
+              //            }
 
               json msgJson;
 
@@ -556,71 +604,36 @@ int main() {
 
   );
 
-// We don't need this since we're not using HTTP but if it's removed the
-// program
-// doesn't compile :-(
-  h.onHttpRequest([](
-      uWS::HttpResponse *res, uWS::HttpRequest
-  req,
-      char *data,
-      size_t, size_t
-  ) {
+  // We don't need this since we're not using HTTP but if it's removed the
+  // program
+  // doesn't compile :-(
+  h.onHttpRequest([](uWS::HttpResponse *res, uWS::HttpRequest req, char *data,
+                     size_t, size_t) {
     const std::string s = "<h1>Hello world!</h1>";
-    if (req.
-
-            getUrl()
-
-            .valueLength == 1) {
-      res->
-          end(s
-                  .
-
-                      data(), s
-
-                  .
-
-                      length()
-
-      );
+    if (req.getUrl().valueLength == 1) {
+      res->end(s.data(), s.length());
     } else {
-// i guess this should be done more gracefully?
+      // i guess this should be done more gracefully?
       res->end(nullptr, 0);
     }
   });
 
-  h.onConnection([&h](
-      uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest
-  req) {
-    std::cout << "Connected!!!" <<
-              std::endl;
+  h.onConnection([&h](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
+    std::cout << "Connected!!!" << std::endl;
   });
 
-  h.onDisconnection([&h](
-      uWS::WebSocket<uWS::SERVER> ws,
-      int code,
-      char *message, size_t
-      length) {
-    ws.
-
-        close();
-
-    std::cout << "Disconnected" <<
-              std::endl;
+  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code,
+                         char *message, size_t length) {
+    ws.close();
+    std::cout << "Disconnected" << std::endl;
   });
 
   int port = 4567;
-  if (h.
-      listen(port)
-      ) {
-    std::cout << "Listening to port " << port <<
-              std::endl;
+  if (h.listen(port)) {
+    std::cout << "Listening to port " << port << std::endl;
   } else {
-    std::cerr << "Failed to listen to port" <<
-              std::endl;
+    std::cerr << "Failed to listen to port" << std::endl;
     return -1;
   }
-  h.
-
-      run();
-
+  h.run();
 }
