@@ -383,7 +383,7 @@ int main() {
                     target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH;
                   } else if (leading_vehicle_distance_m[lane] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
                     next_state = PLCL;
-                    target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH - 5;
+                    target_speed = max(0.0, leading_vehicle_velocity_ms[lane] * MS_TO_MPH - 5);
                   } else {
                     if (leading_vehicle_velocity_ms[lane - 1] > car_speed_ms && ref_vel < MAX_SPEED) {
                       target_speed = MAX_SPEED;
@@ -431,7 +431,7 @@ int main() {
                     target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH;
                   } else if (leading_vehicle_distance_m[lane] < MINIMAL_DISTANCE_TO_CAR_AHEAD_M) {
                     next_state = PLCR;
-                    target_speed = leading_vehicle_velocity_ms[lane] * MS_TO_MPH - 5;
+                    target_speed = max(0.0, leading_vehicle_velocity_ms[lane] * MS_TO_MPH - 5);
                   } else {
                     if (leading_vehicle_velocity_ms[lane + 1] > car_speed_ms && ref_vel < MAX_SPEED) {
                       target_speed = MAX_SPEED;

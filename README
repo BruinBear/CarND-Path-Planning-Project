@@ -1,0 +1,29 @@
+Path Planner
+The path planner in this project contains three parts:
+1. A finite state machine that handles state transition between KEEP_LANE, PREPARE_LANE_CHANGE_LEFT, PREPARE_LANE_CHANGE_RIGHT, LANE_CHANGE_LEFT, LANE_CHANGE_RIGHT. I will list out the criterion for transitions below:
+KL->KL, if the leading car in my lane is far. Match speed limit.
+KL->KL, if all lanes have car and they are too close. Match leading car speed.
+KL->PLCL, if in center lane, and left lane has less cars than right lane.
+KL->PLCL, if not in left most lane.
+KL->PLCR, if not in right most lane.
+
+PLCL->KL, if the leading car in my lane is far enought.
+PLCL->LCL, if leading car in target lane and trailing car in target lane provides big of a gap and the car is matching target lane speed.
+PLCL->PLCL, if my car is too close to leading car in my lane, slow down leading car speed. Otherwise match the speed of leading car in target lane.
+
+LCL->KL if car is in target lane
+LCL->LCL, otherwise match speed of the leading car in target lane.
+
+PLCR and LCR mirros the above.
+
+2. Road status analysis on sensor fusion data.
+Sensor fusion data provides the other car's d, s, vx,vy information. Based on these data, I extract the following:
+Number of cars in lane i.
+Leading car distance in lane i.
+Leading car velocity in lane i.
+Trailing car distance in lane i.
+Trailing car velocity in lane i.
+These summary will help the FSM to determine which is the next transition.
+
+3. Trajectory generation from spline fitting a set of points, which include points on previous trajectory, car's current position, and points on desired trajectory. By including partial previous trajectory, we can increase the continuity of the new trajectory, thus reduce the jerkiness.
+
